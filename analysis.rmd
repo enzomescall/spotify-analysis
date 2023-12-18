@@ -1,0 +1,199 @@
+---
+title: "Wellness Metrics: Investigating Personal Exercise Patterns"
+author: "Enzo Moraes Mescall"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(xml2)
+library(lubridate)
+library(cowplot)
+```
+
+## Introduction
+
+This report presents a comprehensive historical analysis based on two years of meticulously collected personal workout data. The dataset employed in this report is sourced from my workouts on the Strong app, a workout tracker that enables users to record and monitor their training progress (CITATION). This workout data serves as a valuable repository of potential personal insights derived from a diverse range of workouts, reflecting the evolving nature of my personal fitness over the past two years. The dataset has also been augmented with sleep data collected from the Apple Health app, which may provide additional context to the workout performances (CITATION). 
+
+### Dataset description and variables of interest
+
+The exercises dataset contains 3,480 observations across 12 key variables, encompassing over 78 unique exercises stretching from January 26th, 2022 to December 12th, 2023. The sleep dataset contains 990 datapoints of hours slept stretching from as early as 2018 to December 18th, 2023. The variables of interest include per-day measures of the following figures:
+
+- `Exercise Name`: The name of the exercise performed
+- `Date`: The date of the workout
+- `Weight`: The weight lifted in a given set
+- `Reps`: The number of repetitions performed for a given exercise
+- `Sleep`: The number of hours slept on a given day
+
+And the dataset has been augmented with the following  variables:
+
+- `Volume`: The total weight lifted for a given exercise across all sets
+- `Max Weight`: The maximum weight lifted for a given exercise across all sets
+- `Volume per set`: The average weight lifted for a given exercise across all sets
+- `Set number`: The index of the set for a given exercise relative to the whole workout, vaguely representative of how much fatigue has accumulated for a muscle group
+- Percent metrics: The percent change in a given metric relative to the previous time an exercise was done (e.g. percent change in volume from the previous time an exercise was done)
+- Running average percent metrics: The percent change in a given metric relative to the running average of previous times an exercise was done (e.g. percent change in volume from the running average of previous times an exercise was done)
+
+### Objective
+
+Since the dataset surrounds personal data, the conclusions drawn from this report are not intended to be generalized to the broader population. Rather, the goal of this report is to provide a detailed analysis of my personal workout patterns, with the aim of uncovering potential correlations and insights that may be used to optimize future workout strategies.
+
+The central focus of this report revolves around three research questions:
+
+1. How many days of rest should Enzo Moraes Mescall take between workouts to optimize for `Max Weight` increase?
+
+2. How effectiveley can Enzo Moraes Mescall predict his volume for a given exercise in the context of a workout?
+
+3. What is the effect of sleep on Enzo Moraes Mescall's workout performance?
+
+This report is not only an exploration of personal fitness journeys but also a testament to the potential of data-driven insights in enhancing individual training experiences.
+
+## Exploratory Data Analysis
+
+```{r}
+health = read_xml("exportar.xml")
+```
+
+```{r}
+# Extract sleep data
+sleep_data <- health %>%
+  xml_find_all("//Record[@type='HKCategoryTypeIdentifierSleepAnalysis']") %>%
+  map_df(~ {
+    creationDate <- as.POSIXct(xml_attr(., "creationDate"), format = "%Y-%m-%d")
+    startDate <- as.POSIXct(xml_attr(., "startDate"), format = "%Y-%m-%d %H:%M:%S %z")
+    endDate <- as.POSIXct(xml_attr(., "endDate"), format = "%Y-%m-%d %H:%M:%S %z")
+
+    sleep_duration <- as.numeric(difftime(endDate, startDate, units = "hours"))
+
+    data.frame(
+      Date = creationDate,
+      sleep_duration = sleep_duration
+    )
+  }) %>%
+  group_by(Date) %>%
+  summarize(sleep = sum(sleep_duration)) %>%
+  filter(sleep < 15)
+
+weekly_avg_sleep = sleep_data %>%
+  mutate(week_start = floor_date(Date, "week")) %>%
+  group_by(week_start) %>%
+  summarise(week_sleep = mean(sleep)) %>%
+  ungroup()
+```
+
+
+```{r}
+workouts = read_csv("strong.csv")
+```
+
+```{r}
+workout_count = workouts %>%
+  filter(`Weight` > 0, !str_detect(`Exercise Name`, "Assisted")) %>%
+  group_by(`Exercise Name`, `Date`) %>%
+  summarise(count = n()) %>%
+  group_by(`Exercise Name`) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+```
+
+
+```{r}
+# finding the time between this exercise and the last time it was done
+workout_gaps = workouts %>%
+  filter(`Weight` > 0) %>%
+  group_by(`Date`) %>%
+  mutate(set_number = row_number()) %>%
+  ungroup() %>%
+  group_by(`Exercise Name`, `Date`) %>%
+  summarise(volume = sum(`Weight`*`Reps`), max_weight = max(`Weight`),
+            volume_per_set = mean(`Weight`*`Reps`),
+            set_number = min(`set_number`)) %>%
+  arrange(`Exercise Name`, `Date`) %>%
+  mutate(gap = `Date` - lag(`Date`),
+         pct_volume = (`volume`-lag(`volume`))/lag(`volume`),
+         pct_max_weight = (`max_weight`-lag(`max_weight`))/lag(`max_weight`),
+         pct_volume_per_set = (`volume_per_set`-lag(`volume_per_set`))/lag(`volume_per_set`),
+         pct_volume_runavg = (`volume`-cumsum(tail(`volume`, 5))/row_number())/cumsum(tail(`volume`, 5))/row_number(),
+         pct_max_weight_runavg = (`max_weight`-cumsum(tail(`max_weight`, 5))/row_number())/cumsum(tail(`max_weight`, 5))/row_number(),
+         pct_volume_per_set_runavg = (`volume_per_set`-cumsum(tail(`volume_per_set`, 5))/row_number())/cumsum(tail(`volume_per_set`, 5))/row_number()) %>%
+  ungroup() %>%
+  filter(!is.na(gap)) %>%
+  mutate(gap = as.numeric(gap, units = "days"),
+         Date = as.Date(Date, format = "%Y-%m-%d")) %>%
+  right_join(workout_count, by = "Exercise Name") %>%
+  left_join(sleep_data, by = "Date") %>%
+  mutate(week_start = floor_date(Date, "week")) %>%
+  left_join(weekly_avg_sleep, by = "week_start")
+```
+
+```{r}
+# two or four histograms/ densities
+
+# example graph of an exercise (need to find good one) showing pct volume and runavg pct volume
+
+workout_gaps %>%
+  filter(count > 20, `Exercise Name` == "Bench Press (Barbell)") %>%
+  ggplot(aes(x = set_number, y = pct_volume_per_set_runavg)) +
+  geom_point() +
+  geom_smooth(method = lm)
+
+workout_gaps %>%
+    filter(count > 20) %>%
+  ggplot(aes(x = set_number, y = pct_volume_per_set_runavg)) +
+  geom_point() +
+  geom_smooth(method = lm) 
+
+workout_gaps %>%
+    filter(count > 20) %>%
+  ggplot(aes(x = sleep, y = pct_volume_per_set_runavg)) +
+  geom_point() +
+  geom_smooth(method = lm)
+
+workout_gaps %>%
+  filter(count > 20, `Exercise Name` == "Bench Press (Barbell)") %>%
+  ggplot(aes(x = sleep, y = pct_volume_per_set_runavg)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+
+```{r}
+# loop through all exercises and plot x = set_number vs y = pct_volume_per_set_runavg
+# and x = sleep vs y = pct_volume_per_set_runavg
+
+exercise_list = workout_gaps %>%
+  filter(count > 15) %>%
+  pull(`Exercise Name`) %>%
+  unique()
+
+for (execrise in exercise_list) {
+  plot= workout_gaps %>%
+    filter(`Exercise Name` == execrise) %>%
+    ggplot(aes(x = set_number, y = pct_max_weight_runavg)) +
+    geom_point() +
+    geom_smooth(method = lm) +
+    labs(title = execrise)
+  print(plot)
+}
+
+### pct_volume_per_set_runavg
+# Good plots for set_number x pct_volume_per_set_runavg
+# Triceps Extension (Underhand), Hip Abductor (Machine), Lateral Raise (Dumbbell), Seated Row (Cable)
+# Good plots for sleep x pct_volume_per_set_runavg
+# Lat Pulldown (Cable), Chest Fly (Band), Incline Bench Press (Barbell)
+# Good plots for log(gap)
+# Triceps Extension (Underhand), Chest Fly (Band), Bent Over One Arm Row (Dumbbell), Hip Adductor (Machine)
+
+### pct_max_weight_runavg
+# Good plots for set_number x pct_max_weight_runavg
+# Bicep Curl (Dumbbell), Lateral Raise (Dumbbell), Seated Row (Cable), Triceps Extension (Underhand) 
+# Good Plots for sleep x pct_max_weight_runavg
+# Lat Pulldown (Cable), Bench Press (Barbell), backwards correlation Bicep Curl (Dumbbell)
+# Good plots for log(gap) x pct_max_weight_runavg
+# Bench Press (Dumbbell), Chest Fly (Band), Triceps Extension (Underhand)
+```
+
